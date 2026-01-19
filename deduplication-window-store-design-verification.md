@@ -18,7 +18,7 @@ The design document's prose description of cleanup triggers is **accurate**, but
 
 **Section 4.1, lines 275-299** - "Physical Cleanup Process" sequence diagram:
 
-```mermaid
+```
 sequenceDiagram
     participant App as Kafka Streams App   <-- MISLEADING
     ...
