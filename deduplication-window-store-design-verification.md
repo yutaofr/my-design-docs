@@ -122,7 +122,7 @@ public void openExisting(final ProcessorContext context, final long streamTime) 
 
 Replace the current "Physical Cleanup Process" diagram with:
 
-```mermaid
+```
 sequenceDiagram
     participant Proc as User Processor
     participant WS as WindowStore (wrapped)
