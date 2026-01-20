@@ -163,7 +163,7 @@ class RocksDBOverheadScene(Scene):
         )
     
     def build_overhead_stack(self):
-        """Build up the overhead components as a stacked bar chart"""
+        """Build up the overhead components as a stacked bar chart with improved labels"""
         section_title = Text("3. Overhead Breakdown", font_size=36, color=YELLOW)
         section_title.to_edge(UP)
         self.play(Write(section_title))
@@ -182,25 +182,30 @@ class RocksDBOverheadScene(Scene):
         x_label = Text("Storage Multiplier", font_size=20)
         x_label.next_to(ax, DOWN)
         
-        # Component data
+        # Component data with short names for bars and full names for legend
         components = [
-            {"name": "Raw Data", "value": 1.0, "color": BLUE},
-            {"name": "Bloom Filter\n(1.7%)", "value": 0.017, "color": GREEN},
-            {"name": "Index Blocks\n(6.4%)", "value": 0.064, "color": YELLOW},
-            {"name": "Block Meta\n(1.6%)", "value": 0.016, "color": PURPLE},
-            {"name": "Universal\nCompaction\n(20%)", "value": 0.20, "color": RED},
-            {"name": "Fragment\n(3.8%)", "value": 0.038, "color": ORANGE},
+            {"short": "Raw\nData", "full": "Raw Data", "value": 1.0, "color": BLUE, "pct": "1.0x"},
+            {"short": "B", "full": "Bloom Filter", "value": 0.017, "color": GREEN, "pct": "1.7%"},
+            {"short": "I", "full": "Index Blocks", "value": 0.064, "color": YELLOW, "pct": "6.4%"},
+            {"short": "M", "full": "Block Meta", "value": 0.016, "color": PURPLE, "pct": "1.6%"},
+            {"short": "Univ\nComp", "full": "Universal Compaction", "value": 0.20, "color": RED, "pct": "20%"},
+            {"short": "F", "full": "Fragment", "value": 0.038, "color": ORANGE, "pct": "3.8%"},
         ]
         
         # Build bars incrementally
         current_x = 0
         bars = VGroup()
-        labels = VGroup()
+        bar_labels = VGroup()
+        
+        # Legend position (top right)
+        legend_start_y = 2.5
+        legend_items = VGroup()
         
         for i, comp in enumerate(components):
             # Create bar
+            bar_width = comp["value"] * (10/1.4)  # Scale to axis
             bar = Rectangle(
-                width=comp["value"] * (10/1.4),  # Scale to axis
+                width=bar_width,
                 height=1.5,
                 fill_opacity=0.8,
                 fill_color=comp["color"],
@@ -209,9 +214,39 @@ class RocksDBOverheadScene(Scene):
             )
             bar.move_to(ax.c2p(current_x + comp["value"]/2, 0.5))
             
-            # Create label
-            label_text = Text(comp["name"], font_size=14, color=WHITE)
-            label_text.move_to(bar.get_center())
+            # Create label - smart placement based on bar width
+            if bar_width > 0.5:  # Wide enough for text inside
+                label_text = Text(comp["short"], font_size=14, color=WHITE)
+                label_text.move_to(bar.get_center())
+            else:  # Too narrow - put label above with line
+                label_text = Text(comp["short"], font_size=12, color=comp["color"])
+                label_text.move_to(bar.get_top() + UP * 0.5)
+                # Add connecting line
+                line = Line(
+                    bar.get_top(),
+                    label_text.get_bottom(),
+                    color=comp["color"],
+                    stroke_width=1
+                )
+                label_text = VGroup(line, label_text)
+            
+            # Create legend entry
+            legend_box = Rectangle(
+                width=0.3,
+                height=0.2,
+                fill_opacity=0.8,
+                fill_color=comp["color"],
+                stroke_color=WHITE
+            )
+            legend_text = Text(
+                f"{comp['full']} ({comp['pct']})",
+                font_size=16,
+                color=WHITE
+            )
+            legend_text.next_to(legend_box, RIGHT, buff=0.2)
+            legend_entry = VGroup(legend_box, legend_text)
+            legend_entry.to_edge(RIGHT, buff=0.5)
+            legend_entry.shift(UP * (legend_start_y - i * 0.5))
             
             # Animate
             if i == 0:
@@ -219,23 +254,26 @@ class RocksDBOverheadScene(Scene):
                     Create(ax),
                     Write(x_label),
                     FadeIn(bar),
-                    Write(label_text)
+                    Write(label_text) if isinstance(label_text, Text) else Create(label_text),
+                    FadeIn(legend_entry)
                 )
             else:
                 self.play(
                     FadeIn(bar),
-                    Write(label_text),
+                    Write(label_text) if isinstance(label_text, Text) else Create(label_text),
+                    FadeIn(legend_entry),
                     run_time=0.8
                 )
             
             bars.add(bar)
-            labels.add(label_text)
+            bar_labels.add(label_text)
+            legend_items.add(legend_entry)
             current_x += comp["value"]
             
-            # Show running total
+            # Show running total below the bars
             total = sum(c["value"] for c in components[:i+1])
-            total_text = Text(f"= {total:.2f}x", font_size=28, color=YELLOW)
-            total_text.next_to(bar, RIGHT, buff=0.2)
+            total_text = Text(f"Total: {total:.3f}x", font_size=24, color=YELLOW)
+            total_text.next_to(ax, DOWN, buff=1.5)
             
             if i > 0:
                 self.play(Transform(self.running_total, total_text))
@@ -248,14 +286,18 @@ class RocksDBOverheadScene(Scene):
         self.wait(1)
         
         # Store for final scene
-        self.overhead_bars = VGroup(ax, x_label, bars, labels, self.running_total)
+        self.overhead_bars = VGroup(ax, x_label, bars, bar_labels, self.running_total)
+        self.legend_items = legend_items
         
         self.play(FadeOut(section_title))
     
     def show_final_result(self):
         """Show the final validation"""
-        # Move bars up
-        self.play(self.overhead_bars.animate.scale(0.6).to_edge(UP, buff=1))
+        # Move bars and legend up
+        self.play(
+            self.overhead_bars.animate.scale(0.6).to_edge(UP, buff=1),
+            self.legend_items.animate.scale(0.6).to_edge(UP, buff=1).shift(RIGHT * 2)
+        )
         
         # Show comparison
         result_title = Text("4. Validation", font_size=36, color=YELLOW)
