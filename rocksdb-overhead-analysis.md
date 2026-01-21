@@ -9,11 +9,14 @@ Section 3.1 of `deduplication-window-store-design.md` states:
 
 ---
 
-## Answer: YES - Fully Justified
+## Answer: Depends on Scenario
 
-**Calculated overhead**: **x1.33** for the deduplication use case  
-**Document claim**: x1.3  
-**Verdict**: ✅ **Accurate**
+| Scenario | Calculated Overhead | Document Claim | Verdict |
+|----------|---------------------|----------------|---------|
+| **Expected Case** | **x1.04** | x1.3 | ⚠️ Document is conservative |
+| **Pessimistic Case** | **x1.45** | x1.3 | ❌ Document is **optimistic** |
+
+**Recommendation**: Use **x1.5** for capacity planning (rounded up from 1.45x for safety margin)
 
 ---
 
@@ -22,26 +25,47 @@ Section 3.1 of `deduplication-window-store-design.md` states:
 ### Use Case Characteristics
 
 From the design document:
-- **Key**: 64 bytes (hash/UUID - high entropy data)
-- **Value**: 8 bytes (timestamp - high entropy data)
+- **Key**: 64 bytes (business key/content hash - ordinary string)
+- **Value**: 8 bytes (timestamp)
 - **Workload**: 99%+ append-only (deduplication)
 - **Compaction**: Universal (optimized for writes)
 - **Compression**: LZ4 enabled
 
 ### Overhead Calculation
 
+#### Expected Case (Normal Scenario)
+
 ```
 Component                        | Factor  | Explanation
 ---------------------------------|---------|----------------------------------
-Raw data (Key 64B + Value 8B)    | 1.00x   | LZ4 fails on high-entropy data
+Raw data after LZ4               | 0.70x   | Ordinary strings compress ~30%
 Bloom filter (10 bits/key)       | +0.017x | 1.25 bytes per key = 1.7%
 Index blocks                     | +0.064x | Large keys (64B) vs small values (8B) = 6.4%
 Block metadata (headers, CRC32)  | +0.016x | Per-block overhead = 1.6%
 Universal Compaction overhead    | +0.200x | Temporary SST files, delayed cleanup = 20%
 Fragmentation (alignment)        | +0.038x | Block padding, segment overhead = 3.8%
 ---------------------------------|---------|----------------------------------
-Total                            | 1.335x  | ≈ 1.3x (matches document)
+Total                            | 1.035x  | ≈ 1.0x (minimal overhead)
 ```
+
+#### Pessimistic Case (Worst-Case Scenario)
+
+```
+Component                        | Factor  | Explanation
+---------------------------------|---------|----------------------------------
+Raw data after LZ4               | 0.95x   | Low-repetition strings, minimal compression
+Bloom filter (10 bits/key)       | +0.017x | 1.25 bytes per key = 1.7%
+Index blocks                     | +0.064x | Large keys (64B) vs small values (8B) = 6.4%
+Block metadata (headers, CRC32)  | +0.016x | Per-block overhead = 1.6%
+Universal Compaction overhead    | +0.350x | Peak: 2x temp space during major compaction = 35%
+Fragmentation (alignment)        | +0.050x | Worst-case block padding = 5%
+---------------------------------|---------|----------------------------------
+Total                            | 1.447x  | ≈ 1.45x (conservative estimate)
+```
+
+> **Note**: Kafka Streams disables RocksDB WAL (uses changelog topic instead), so WAL overhead is excluded.
+
+**Recommendation**: Use **1.5x** for capacity planning.
 
 ### Key Insight: Why Index Overhead is High (6.4%)
 
@@ -126,50 +150,50 @@ Measured:
 
 ---
 
-## Why Compression Doesn't Help
+## LZ4 Compression on Ordinary Strings
 
-**LZ4 compression requires patterns to compress:**
+**Ordinary string keys compress well:**
 
 ```
-JSON example (compresses well):
-  {"user":"john","age":30} → 26 bytes
-  LZ4 output: ~12 bytes (2x compression)
+Business key example (64 bytes):
+  user_12345_product_67890_order_...
+  LZ4 output: ~45 bytes (30% compression)
   
-Hash key example (doesn't compress):
-  a1b2c3d4e5f6789... → 64 bytes (uniform distribution)
-  LZ4 output: ~64-66 bytes (no compression, frame overhead)
-  
-Timestamp example (too small):
-  1704067200000 → 8 bytes
-  LZ4 output: ~8-10 bytes (frame overhead > benefit)
+Timestamp (8 bytes):
+  1704067200000
+  LZ4 output: ~8 bytes (no benefit, too small)
 ```
 
-**Result**: Compression baseline is **1.0x** for deduplication, not the typical 0.3-0.5x for text/JSON.
+**Result**: LZ4 achieves **~0.7x compression** on string keys, offsetting other overhead.
 
 ---
 
 ## Validation
 
-| Source | Reported Overhead | Match? |
-|--------|------------------|--------|
-| **My calculation** | 1.33x | ✅ |
-| **Design document** | 1.3x | ✅ |
-| **Facebook FAST '20** | 1.3-2.0x (Universal) | ✅ |
-| **TidesDB benchmarks** | 1.3-1.4x (high-entropy) | ✅ |
-| **Mark Callaghan** | 1.1-1.3x (LSM append-heavy) | ✅ |
+| Source | Reported Overhead | Our Analysis | Match? |
+|--------|------------------|--------------|--------|
+| **Design document** | 1.3x | Expected: 1.04x, Pessimistic: 1.45x | ⚠️ Between our two scenarios |
+| **Facebook FAST '20** | 1.3-2.0x (Universal) | 1.45x (pessimistic) | ✅ Within range |
+| **TidesDB benchmarks** | 1.3-1.4x (uncompressible data) | 1.04x (compressed strings) | ⚠️ Different data type |
+| **Mark Callaghan** | 1.1-1.3x (LSM append-heavy) | 1.04-1.45x range | ✅ Comparable |
 
 ---
 
 ## Conclusion
 
-The **x1.3 overhead is justified** and supported by:
+| Case | Overhead | Suitable For |
+|------|----------|--------------|
+| **Expected** | **1.0x** | Average load, typical string keys |
+| **Pessimistic** | **1.45x** | Capacity planning, SLA guarantees |
+| **Document Claim** | **1.3x** | Middle ground (acceptable) |
 
-1. ✅ **First-principles calculation**: 1.0 + 0.1 (metadata) + 0.2 (LSM) = 1.3x
-2. ✅ **Official RocksDB documentation**: Bloom filters, index blocks, compaction overhead
-3. ✅ **Academic research**: Facebook's production RocksDB measurements at USENIX
-4. ✅ **Industry benchmarks**: Independent measurements confirm 1.3-1.4x for this workload type
+**For production capacity planning**: Use **x1.5** (rounded up from calculated 1.45x) to account for:
+- Worst-case compression (low repetition strings)
+- Universal compaction peak amplification (35% during major compaction)
+- Fragmentation and alignment overhead
+- Safety margin for unexpected peaks
 
-The estimate is **not conservative but precise** for deduplication workloads with high-entropy keys and Universal Compaction.
+**For cost optimization**: Measure actual overhead after 1 week, adjust down if stable at 1.0-1.2x.
 
 ---
 
