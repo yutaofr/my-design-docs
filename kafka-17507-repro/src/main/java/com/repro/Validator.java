@@ -5,6 +5,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -13,6 +15,8 @@ import java.util.Map;
 import java.util.Properties;
 
 public class Validator {
+    private static final Logger log = LoggerFactory.getLogger(Validator.class);
+
     public static void main(String[] args) {
         String bootstrapServers = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka-1:9092");
         String sinkTopic = System.getenv().getOrDefault("SINK_TOPIC", "sink-topic");
@@ -35,7 +39,7 @@ public class Validator {
         long totalRecords = 0;
         long bugsDetected = 0;
 
-        System.out.println("Validator started (read_committed)...");
+        log.info("Validator started (read_committed)...");
 
         while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
@@ -50,18 +54,16 @@ public class Validator {
 
                 if (lastWatermark != null && newWatermark != lastWatermark) {
                     bugsDetected++;
-                    System.err.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    System.err.println("BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)");
-                    System.err.println("Key: " + key);
-                    System.err.println("Last Committed Watermark: " + lastWatermark);
-                    System.err.println("New Committed Watermark : " + newWatermark);
-                    System.err.println("Offset: " + record.offset() + ", Partition: " + record.partition());
-                    System.err.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    log.error("BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)");
+                    log.error("Key: {}, Last: {}, New: {}, Offset: {}, Partition: {}", 
+                        key, lastWatermark, newWatermark, record.offset(), record.partition());
+                    log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                 }
 
                 // If StreamApp itself detected the regression via Cassandra
                 if (status == 3) {
-                    System.err.println("[StreamApp Signal] State store regression detected for key: " + key);
+                    log.error("[StreamApp Signal] State store regression detected for key: {}", key);
                 }
 
                 if (lastWatermark == null) {
@@ -69,7 +71,7 @@ public class Validator {
                 }
 
                 if (totalRecords % 1000 == 0) {
-                    System.out.println("Validated " + totalRecords + " records. Bugs detected: " + bugsDetected);
+                    log.info("Validated {} records. Bugs detected: {}", totalRecords, bugsDetected);
                 }
             }
         }

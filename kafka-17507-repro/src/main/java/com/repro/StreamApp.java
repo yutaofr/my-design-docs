@@ -19,6 +19,8 @@ import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.net.InetSocketAddress;
@@ -26,6 +28,7 @@ import java.time.Duration;
 import java.util.Properties;
 
 public class StreamApp {
+    private static final Logger log = LoggerFactory.getLogger(StreamApp.class);
 
     public static void main(String[] args) {
         String bootstrapServers = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka-1:9092");
@@ -39,7 +42,7 @@ public class StreamApp {
             File stateDir = new File("/tmp/kafka-streams");
             if (stateDir.exists()) {
                 deleteRecursively(stateDir);
-                System.out.println("Cleaned state directory: " + stateDir);
+                log.info("Cleaned state directory: {}", stateDir);
             }
         }
 
@@ -157,12 +160,11 @@ public class StreamApp {
                 long cassandraWatermark = row.getLong("watermark");
                 if (newWatermark != cassandraWatermark) {
                     status = 3;
-                    System.err.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    System.err.println("BUG REPRODUCED: STATE STORE REGRESSION DETECTED");
-                    System.err.println("Key=" + key);
-                    System.err.println("Cassandra (Truth)=" + cassandraWatermark);
-                    System.err.println("StateStore (Regressed)=" + newWatermark);
-                    System.err.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    log.error("BUG REPRODUCED: STATE STORE REGRESSION DETECTED");
+                    log.error("TaskID={}, Key={}, Cassandra(Truth)={}, StateStore(Regressed)={}", 
+                        context.taskId(), key, cassandraWatermark, newWatermark);
+                    log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                 }
             } else {
                 BoundStatement insertBound = insertStmt.bind(key, newWatermark)

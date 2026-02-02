@@ -55,6 +55,11 @@ check_bug() {
         docker compose logs kafka-3 > kafka-3.log
         docker compose logs validator > validator.log
         
+        echo "Dumping Stream App Logs..."
+        docker compose logs stream-app-1 > stream-app-1.log
+        docker compose logs stream-app-2 > stream-app-2.log
+        docker compose logs stream-app-3 > stream-app-3.log
+        
         echo "Running Root Cause Analysis..."
         python3 scripts/analyze_logs.py kafka-1.log || true
         python3 scripts/analyze_logs.py kafka-2.log || true
