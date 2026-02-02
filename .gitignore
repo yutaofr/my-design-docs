@@ -1,0 +1,7 @@
+__pycache__
+kafka-17507-repro/.classpath
+kafka-17507-repro/.project
+kafka-17507-repro/*.log
+kafka-17507-repro/.gradle
+kafka-17507-repro/.settings
+media

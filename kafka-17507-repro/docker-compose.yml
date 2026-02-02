@@ -1,0 +1,258 @@
+version: '3.8'
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+networks:
+  repro-net:
+    driver: bridge
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    hostname: zookeeper
+    container_name: zookeeper
+    networks:
+      - repro-net
+    logging: *default-logging
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xmx256M -Xms256M"
+
+  kafka-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.kafka
+    hostname: kafka-1
+    container_name: kafka-1
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - zookeeper
+    networks:
+      - repro-net
+    logging: *default-logging
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE: LogAppendTime
+      KAFKA_LOG4J_LOGGERS: "kafka.coordinator.transaction=TRACE,kafka.coordinator.group=DEBUG,kafka.server.ReplicaManager=DEBUG,state.change.logger=TRACE"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 268435456
+
+  kafka-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.kafka
+    hostname: kafka-2
+    container_name: kafka-2
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - zookeeper
+    networks:
+      - repro-net
+    logging: *default-logging
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,PLAINTEXT_HOST://localhost:39092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE: LogAppendTime
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_LOGGERS: "kafka.coordinator.transaction=TRACE,kafka.coordinator.group=DEBUG,kafka.server.ReplicaManager=DEBUG,state.change.logger=TRACE"
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 268435456
+
+  kafka-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.kafka
+    hostname: kafka-3
+    container_name: kafka-3
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - zookeeper
+    networks:
+      - repro-net
+    logging: *default-logging
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092,PLAINTEXT_HOST://localhost:49092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE: LogAppendTime
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_LOGGERS: "kafka.coordinator.transaction=TRACE,kafka.coordinator.group=DEBUG,kafka.server.ReplicaManager=DEBUG,state.change.logger=TRACE"
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 268435456
+
+  cassandra-1:
+    image: cassandra:4.1
+    container_name: cassandra-1
+    networks:
+      - repro-net
+    logging: *default-logging
+    environment:
+      - CASSANDRA_SEEDS=cassandra-1,cassandra-2
+      - CASSANDRA_CLUSTER_NAME=ReproCluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
+    healthcheck:
+      test: ["CMD-SHELL", "[ $$(nodetool statusgossip) = running ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  cassandra-2:
+    image: cassandra:4.1
+    container_name: cassandra-2
+    networks:
+      - repro-net
+    depends_on:
+      - cassandra-1
+    logging: *default-logging
+    environment:
+      - CASSANDRA_SEEDS=cassandra-1,cassandra-2
+      - CASSANDRA_CLUSTER_NAME=ReproCluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
+
+  cassandra-3:
+    image: cassandra:4.1
+    container_name: cassandra-3
+    networks:
+      - repro-net
+    depends_on:
+      - cassandra-1
+    logging: *default-logging
+    environment:
+      - CASSANDRA_SEEDS=cassandra-1,cassandra-2
+      - CASSANDRA_CLUSTER_NAME=ReproCluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
+
+  # Initializer for Cassandra Schema
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+    networks:
+      - repro-net
+    logging: *default-logging
+    volumes:
+      - ./scripts/init.cql:/init.cql
+    entrypoint: ["/bin/bash", "-c", "echo 'Waiting for Cassandra CQL port...'; until cqlsh cassandra-1 -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1; do echo 'Waiting for Cassandra...'; sleep 5; done; echo 'Cassandra is up!'; cqlsh cassandra-1 -f /init.cql && echo 'Schema initialized'"]
+
+  stream-app-1:
+    build: .
+    image: repro-app:latest
+    command: java -Xmx256m -cp /app/app.jar:/app/kafka-17507-repro/lib/* com.repro.StreamApp
+    hostname: stream-app-1
+    networks:
+      - repro-net
+    depends_on:
+      - kafka-1
+      - cassandra-init
+    logging: *default-logging
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      CASSANDRA_CONTACT: cassandra-1
+      APP_ID: eos-repro-group
+      CLEAN_STATE: ${CLEAN_STATE:-false}
+    restart: always
+
+  stream-app-2:
+    image: repro-app:latest
+    command: java -Xmx256m -cp /app/app.jar:/app/kafka-17507-repro/lib/* com.repro.StreamApp
+    hostname: stream-app-2
+    networks:
+      - repro-net
+    depends_on:
+      - kafka-1
+      - cassandra-init
+    logging: *default-logging
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      CASSANDRA_CONTACT: cassandra-1
+      APP_ID: eos-repro-group
+      CLEAN_STATE: ${CLEAN_STATE:-false}
+    restart: always
+
+  stream-app-3:
+    image: repro-app:latest
+    command: java -Xmx256m -cp /app/app.jar:/app/kafka-17507-repro/lib/* com.repro.StreamApp
+    hostname: stream-app-3
+    networks:
+      - repro-net
+    depends_on:
+      - kafka-1
+      - cassandra-init
+    logging: *default-logging
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      CASSANDRA_CONTACT: cassandra-1
+      APP_ID: eos-repro-group
+      CLEAN_STATE: ${CLEAN_STATE:-false}
+    restart: always
+
+  injector:
+    image: repro-app:latest
+    command: java -Xmx256m -cp /app/app.jar:/app/kafka-17507-repro/lib/* com.repro.Injector
+    networks:
+      - repro-net
+    depends_on:
+      - kafka-1
+    logging: *default-logging
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    profiles:
+      - tools
+
+  validator:
+    image: repro-app:latest
+    command: java -Xmx256m -cp /app/app.jar:/app/kafka-17507-repro/lib/* com.repro.Validator
+    networks:
+      - repro-net
+    depends_on:
+      - kafka-1
+    logging: *default-logging
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    restart: always

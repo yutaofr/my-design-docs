@@ -1,0 +1,19 @@
+FROM rockylinux:8 AS builder
+# Download iproute-tc and its specific dependencies not likely in UBI minimal
+RUN yum install -y --downloadonly --downloaddir=/rpms \
+    iproute-tc \
+    iptables-libs \
+    libibverbs \
+    libnl3 \
+    libpcap
+
+FROM confluentinc/cp-kafka:7.5.3
+USER root
+# Copy RPMs from builder
+COPY --from=builder /rpms/*.rpm /tmp/rpms/
+# Install local RPMs and iproute (which exists in UBI)
+RUN yum clean all && \
+    yum install -y iproute && \
+    yum install -y /tmp/rpms/*.rpm && \
+    rm -rf /tmp/rpms
+USER appuser
