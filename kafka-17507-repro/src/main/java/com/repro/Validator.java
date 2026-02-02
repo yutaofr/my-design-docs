@@ -52,7 +52,7 @@ public class Validator {
 
                 Long lastWatermark = lastWatermarkPerKey.get(key);
 
-                if (lastWatermark != null && newWatermark != lastWatermark && status == 3) {
+                if (lastWatermark != null && newWatermark != lastWatermark) {
                     bugsDetected++;
                     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                     log.error("BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)");

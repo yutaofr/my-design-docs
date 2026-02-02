@@ -32,7 +32,10 @@ docker compose exec kafka-1 kafka-topics --bootstrap-server localhost:9092 --cre
 docker compose exec kafka-1 kafka-topics --bootstrap-server localhost:9092 --create --topic sink-topic --partitions 64 --replication-factor 3 --if-not-exists || true
 
 echo "Waiting for Cassandra Schema Init..."
-docker compose logs -f cassandra-init | grep -q "Schema initialized"
+until docker compose logs cassandra-init 2>/dev/null | grep -q "Schema initialized"; do
+    echo "Waiting for schema init..."
+    sleep 3
+done
 echo "Cassandra ready."
 
 echo "Starting Validator..."

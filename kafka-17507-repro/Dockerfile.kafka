@@ -18,6 +18,7 @@ RUN yum clean all && \
     rm -rf /tmp/rpms
 
 COPY log4j.properties /etc/kafka/log4j.properties
+RUN chmod 666 /etc/kafka/log4j.properties
 ENV KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:/etc/kafka/log4j.properties"
 
 USER appuser
