@@ -107,7 +107,7 @@ public class StreamApp {
     public static class WatermarkTransformer implements Transformer<String, String, KeyValue<String, String>> {
         private final String storeName;
         private final String cassandraContact;
-        private KeyValueStore<String, Long> store;
+        private KeyValueStore<Integer, Long> store;
         private ProcessorContext context;
 
         private CqlSession session;
@@ -122,7 +122,7 @@ public class StreamApp {
         @Override
         public void init(ProcessorContext context) {
             this.context = context;
-            this.store = (KeyValueStore<String, Long>) context.getStateStore(storeName);
+            this.store = (KeyValueStore<Integer, Long>) context.getStateStore(storeName);
 
             // Connect to Cassandra
             this.session = CqlSession.builder()
@@ -142,13 +142,14 @@ public class StreamApp {
             // In EOS, the output should NEVER decrease for the same key.
 
             long recordTimestamp = context.timestamp();
-            Long storedWatermark = store.get(key);
+            int recordPartition = context.partition();
+            Long storedWatermark = store.get(recordPartition);
 
             // LOGIC: newWatermark = max(stored_watermark, current_record_timestamp)
             long currentWatermark = (storedWatermark == null) ? 0L : storedWatermark;
             long newWatermark = Math.max(currentWatermark, recordTimestamp);
 
-            store.put(key, newWatermark);
+            store.put(recordPartition, newWatermark);
 
             // Double-check against Cassandra to verify regression immediately
             BoundStatement selectBound = selectStmt.bind(key).setConsistencyLevel(ConsistencyLevel.QUORUM);
@@ -162,8 +163,8 @@ public class StreamApp {
                     status = 3;
                     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                     log.error("BUG REPRODUCED: STATE STORE REGRESSION DETECTED");
-                    log.error("TaskID={}, Key={}, Cassandra(Truth)={}, StateStore(Regressed)={}", 
-                        context.taskId(), key, cassandraWatermark, newWatermark);
+                    log.error("TaskID={}, Key={}, Cassandra(Truth)={}, StateStore(Regressed)={}",
+                            context.taskId(), key, cassandraWatermark, newWatermark);
                     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                 }
             } else {

@@ -29,14 +29,12 @@ public class Injector {
 
         System.out.println("Starting injection of " + (numPartitions * messagesPerPartition) + " messages...");
 
-        long baseTimestamp = System.currentTimeMillis();
-
         for (int p = 0; p < numPartitions; p++) {
-            String key = "key-" + p;
             for (int i = 1; i <= messagesPerPartition; i++) {
                 // Use a monotonically increasing timestamp
-                long timestamp = baseTimestamp + i;
-                producer.send(new ProducerRecord<>(topic, key, "val-" + i));
+                String key = "key-" + p + "-" + i;
+
+                producer.send(new ProducerRecord<>(topic, key, "val-" + p + "-" + i));
             }
             System.out.println("Filled partition " + p);
         }

@@ -52,18 +52,13 @@ public class Validator {
 
                 Long lastWatermark = lastWatermarkPerKey.get(key);
 
-                if (lastWatermark != null && newWatermark != lastWatermark) {
+                if (lastWatermark != null && newWatermark != lastWatermark && status == 3) {
                     bugsDetected++;
                     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                     log.error("BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)");
-                    log.error("Key: {}, Last: {}, New: {}, Offset: {}, Partition: {}", 
-                        key, lastWatermark, newWatermark, record.offset(), record.partition());
+                    log.error("Key: {}, Last: {}, New: {}, Offset: {}, Partition: {}",
+                            key, lastWatermark, newWatermark, record.offset(), record.partition());
                     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                }
-
-                // If StreamApp itself detected the regression via Cassandra
-                if (status == 3) {
-                    log.error("[StreamApp Signal] State store regression detected for key: {}", key);
                 }
 
                 if (lastWatermark == null) {
