@@ -22,6 +22,11 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
       KAFKA_HEAP_OPTS: "-Xmx256M -Xms256M"
+    healthcheck:
+      test: [ "CMD-SHELL", "echo 'ls /' | zookeeper-shell localhost:2181 2>/dev/null | grep -q zookeeper" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   kafka-1:
     build:
@@ -32,7 +37,8 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - repro-net
     logging: *default-logging
@@ -52,6 +58,11 @@ services:
       KAFKA_LOG_RETENTION_BYTES: 1073741824
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_LOG_SEGMENT_BYTES: 268435456
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
 
   kafka-2:
     build:
@@ -62,7 +73,8 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - repro-net
     logging: *default-logging
@@ -82,6 +94,11 @@ services:
       KAFKA_LOG_RETENTION_BYTES: 1073741824
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_LOG_SEGMENT_BYTES: 268435456
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
 
   kafka-3:
     build:
@@ -92,7 +109,8 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - repro-net
     logging: *default-logging
@@ -112,6 +130,11 @@ services:
       KAFKA_LOG_RETENTION_BYTES: 1073741824
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_LOG_SEGMENT_BYTES: 268435456
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
 
   cassandra-1:
     image: cassandra:4.1
@@ -128,7 +151,7 @@ services:
       - HEAP_NEWSIZE=100M
       - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
     healthcheck:
-      test: ["CMD-SHELL", "[ $$(nodetool statusgossip) = running ]"]
+      test: [ "CMD-SHELL", "[ $$(nodetool statusgossip) = running ]" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -139,7 +162,8 @@ services:
     networks:
       - repro-net
     depends_on:
-      - cassandra-1
+      cassandra-1:
+        condition: service_healthy
     logging: *default-logging
     environment:
       - CASSANDRA_SEEDS=cassandra-1,cassandra-2
@@ -149,6 +173,11 @@ services:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=100M
       - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
+    healthcheck:
+      test: [ "CMD-SHELL", "[ $$(nodetool statusgossip) = running ]" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   cassandra-3:
     image: cassandra:4.1
@@ -156,7 +185,8 @@ services:
     networks:
       - repro-net
     depends_on:
-      - cassandra-1
+      cassandra-1:
+        condition: service_healthy
     logging: *default-logging
     environment:
       - CASSANDRA_SEEDS=cassandra-1,cassandra-2
@@ -166,6 +196,11 @@ services:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=100M
       - JVM_OPTS=-Dcassandra.commitlog_segment_size_in_mb=8
+    healthcheck:
+      test: [ "CMD-SHELL", "[ $$(nodetool statusgossip) = running ]" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # Initializer for Cassandra Schema
   cassandra-init:
@@ -178,7 +213,7 @@ services:
     logging: *default-logging
     volumes:
       - ./scripts/init.cql:/init.cql
-    entrypoint: ["/bin/bash", "-c", "echo 'Waiting for Cassandra CQL port...'; until cqlsh cassandra-1 -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1; do echo 'Waiting for Cassandra...'; sleep 5; done; echo 'Cassandra is up!'; cqlsh cassandra-1 -f /init.cql && echo 'Schema initialized'"]
+    entrypoint: [ "/bin/bash", "-c", "echo 'Waiting for Cassandra CQL port...'; until cqlsh cassandra-1 -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1; do echo 'Waiting for Cassandra...'; sleep 5; done; echo 'Cassandra is up!'; cqlsh cassandra-1 -f /init.cql && echo 'Schema initialized'" ]
 
   stream-app-1:
     build: .
@@ -188,14 +223,27 @@ services:
     networks:
       - repro-net
     depends_on:
-      - kafka-1
-      - cassandra-init
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+      cassandra-1:
+        condition: service_healthy
     logging: *default-logging
     environment:
       BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       CASSANDRA_CONTACT: cassandra-1
       APP_ID: eos-repro-group
-      CLEAN_STATE: ${CLEAN_STATE:-false}
+      CLEAN_STATE: ${CLEAN_STATE:-true}
+      HOSTNAME: stream-app-1
+    healthcheck:
+      test: [ "CMD-SHELL", "test -f /tmp/healthy" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     restart: always
 
   stream-app-2:
@@ -205,14 +253,27 @@ services:
     networks:
       - repro-net
     depends_on:
-      - kafka-1
-      - cassandra-init
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+      cassandra-1:
+        condition: service_healthy
     logging: *default-logging
     environment:
       BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       CASSANDRA_CONTACT: cassandra-1
       APP_ID: eos-repro-group
-      CLEAN_STATE: ${CLEAN_STATE:-false}
+      CLEAN_STATE: ${CLEAN_STATE:-true}
+      HOSTNAME: stream-app-2
+    healthcheck:
+      test: [ "CMD-SHELL", "test -f /tmp/healthy" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     restart: always
 
   stream-app-3:
@@ -222,14 +283,27 @@ services:
     networks:
       - repro-net
     depends_on:
-      - kafka-1
-      - cassandra-init
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+      cassandra-1:
+        condition: service_healthy
     logging: *default-logging
     environment:
       BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       CASSANDRA_CONTACT: cassandra-1
       APP_ID: eos-repro-group
-      CLEAN_STATE: ${CLEAN_STATE:-false}
+      CLEAN_STATE: ${CLEAN_STATE:-true}
+      HOSTNAME: stream-app-3
+    healthcheck:
+      test: [ "CMD-SHELL", "test -f /tmp/healthy" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     restart: always
 
   injector:
@@ -238,7 +312,12 @@ services:
     networks:
       - repro-net
     depends_on:
-      - kafka-1
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
     logging: *default-logging
     environment:
       BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
@@ -251,7 +330,12 @@ services:
     networks:
       - repro-net
     depends_on:
-      - kafka-1
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
     logging: *default-logging
     environment:
       BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092

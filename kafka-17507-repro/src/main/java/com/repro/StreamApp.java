@@ -36,10 +36,11 @@ public class StreamApp {
         String sourceTopic = System.getenv().getOrDefault("SOURCE_TOPIC", "source-topic");
         String sinkTopic = System.getenv().getOrDefault("SINK_TOPIC", "sink-topic");
         String cassandraContact = System.getenv().getOrDefault("CASSANDRA_CONTACT", "cassandra-1");
+        String hostname = System.getenv().getOrDefault("HOSTNAME", "unknown-host-" + System.currentTimeMillis());
         boolean cleanState = Boolean.parseBoolean(System.getenv().getOrDefault("CLEAN_STATE", "false"));
 
         if (cleanState) {
-            File stateDir = new File("/tmp/kafka-streams");
+            File stateDir = new File("/var/lib/kafka-streams");
             if (stateDir.exists()) {
                 deleteRecursively(stateDir);
                 log.info("Cleaned state directory: {}", stateDir);
@@ -53,18 +54,22 @@ public class StreamApp {
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
         props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 2);
-        props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);
+        props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 2);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+        // Static Membership to prevent rebalance storms
+        props.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, hostname);
+        props.put(StreamsConfig.STATE_DIR_CONFIG, "/var/lib/kafka-streams");
 
         // AGGRESSIVE CHAOS CONFIGURATION
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
-        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 6000);
-        props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 2000);
+        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 10000);
+        props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 3000);
         props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 30000);
-        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1);
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 100);
         props.put(StreamsConfig.producerPrefix("transaction.timeout.ms"), 5000);
-        props.put(StreamsConfig.producerPrefix("delivery.timeout.ms"), 10000);
-        props.put(StreamsConfig.producerPrefix("request.timeout.ms"), 5000);
+        props.put(StreamsConfig.producerPrefix("delivery.timeout.ms"), 30000);
+        props.put(StreamsConfig.producerPrefix("request.timeout.ms"), 15000);
 
         // Replication for internal topics
         props.put(StreamsConfig.REPLICATION_FACTOR_CONFIG, 3);
@@ -74,10 +79,12 @@ public class StreamApp {
 
         // Define State Store
         String storeName = "watermark-store";
-        StoreBuilder<KeyValueStore<String, Long>> storeBuilder = Stores.keyValueStoreBuilder(
+        java.util.Map<String, String> changelogConfig = new java.util.HashMap<>();
+        changelogConfig.put("cleanup.policy", "compact,delete");
+        StoreBuilder<KeyValueStore<Integer, Long>> storeBuilder = Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(storeName),
-                Serdes.String(),
-                Serdes.Long()).withLoggingEnabled(new java.util.HashMap<>());
+                Serdes.Integer(),
+                Serdes.Long()).withLoggingEnabled(changelogConfig);
 
         builder.addStateStore(storeBuilder);
 
@@ -87,9 +94,32 @@ public class StreamApp {
                 .to(sinkTopic, Produced.with(Serdes.String(), Serdes.String()));
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
+
+        // Add state listener to log status for healthcheck
+        streams.setStateListener((newState, oldState) -> {
+            log.info("Stream app state changed: {} -> {}", oldState, newState);
+            if (newState == KafkaStreams.State.RUNNING) {
+                log.info("Stream app is RUNNING");
+                // Create health file for Docker healthcheck
+                try {
+                    new File("/tmp/healthy").createNewFile();
+                } catch (Exception e) {
+                    log.warn("Failed to create health file", e);
+                }
+            } else if (newState == KafkaStreams.State.ERROR ||
+                    newState == KafkaStreams.State.PENDING_ERROR ||
+                    newState == KafkaStreams.State.NOT_RUNNING) {
+                // Remove health file when not healthy
+                new File("/tmp/healthy").delete();
+            }
+        });
+
         streams.start();
 
-        Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            streams.close();
+            WatermarkTransformer.closeSharedSession();
+        }));
     }
 
     private static void deleteRecursively(File file) {
@@ -110,7 +140,8 @@ public class StreamApp {
         private KeyValueStore<Integer, Long> store;
         private ProcessorContext context;
 
-        private CqlSession session;
+        // Shared session to avoid opening 64 connections (one per task)
+        private static volatile CqlSession sharedSession;
         private PreparedStatement selectStmt;
         private PreparedStatement insertStmt;
 
@@ -119,18 +150,32 @@ public class StreamApp {
             this.cassandraContact = cassandraContact;
         }
 
+        private static synchronized CqlSession getSession(String contactPoint) {
+            if (sharedSession == null) {
+                sharedSession = CqlSession.builder()
+                        .addContactPoint(new InetSocketAddress(contactPoint, 9042))
+                        .withLocalDatacenter("datacenter1")
+                        .build();
+            }
+            return sharedSession;
+        }
+
+        public static synchronized void closeSharedSession() {
+            if (sharedSession != null) {
+                sharedSession.close();
+                sharedSession = null;
+            }
+        }
+
         @Override
         public void init(ProcessorContext context) {
             this.context = context;
             this.store = (KeyValueStore<Integer, Long>) context.getStateStore(storeName);
 
-            // Connect to Cassandra
-            this.session = CqlSession.builder()
-                    .addContactPoint(new InetSocketAddress(cassandraContact, 9042))
-                    .withLocalDatacenter("datacenter1")
-                    .build();
+            // Use shared session
+            CqlSession session = getSession(cassandraContact);
 
-            // Prepare statements
+            // Prepare statements (these are lightweight to re-prepare)
             this.selectStmt = session.prepare("SELECT watermark FROM repro.state WHERE id = ?");
             this.insertStmt = session.prepare("INSERT INTO repro.state (id, watermark) VALUES (?, ?)");
         }
@@ -153,7 +198,7 @@ public class StreamApp {
 
             // Double-check against Cassandra to verify regression immediately
             BoundStatement selectBound = selectStmt.bind(key).setConsistencyLevel(ConsistencyLevel.QUORUM);
-            ResultSet rs = session.execute(selectBound);
+            ResultSet rs = sharedSession.execute(selectBound);
             Row row = rs.one();
 
             int status = 1; // 1 = OK, 3 = REGRESSION (BUG)
@@ -170,13 +215,7 @@ public class StreamApp {
             } else {
                 BoundStatement insertBound = insertStmt.bind(key, newWatermark)
                         .setConsistencyLevel(ConsistencyLevel.QUORUM);
-                session.execute(insertBound);
-            }
-
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                sharedSession.execute(insertBound);
             }
 
             return new KeyValue<>(key, newWatermark + "," + status);
@@ -184,8 +223,9 @@ public class StreamApp {
 
         @Override
         public void close() {
-            if (session != null)
-                session.close();
+            // Do not close the shared session here as other tasks might still be using it.
+            // In a real app, you'd manage lifecycle more carefully, but for this repro,
+            // letting the JVM shutdown hook or process exit handle it is fine.
         }
     }
 }
