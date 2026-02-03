@@ -52,9 +52,9 @@ Kafka's `exactly_once_v2` relies on the Transaction Coordinator (TC) to fence ol
 
 ```mermaid
 sequenceDiagram
-    participant B as Kafka Broker (Coordinator)
-    participant A1 as Node A (Original Active)
-    participant A2 as Node B (Promoted Standby)
+    participant B as "Kafka Broker (Coordinator)"
+    participant A1 as "Node A (Original Active)"
+    participant A2 as "Node B (Promoted Standby)"
 
     Note over A1, A2: Phase 1: Valid Processing
     A1->>B: Commit Transaction T1 (State=V100)
