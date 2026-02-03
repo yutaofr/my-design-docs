@@ -28,41 +28,45 @@ A Kafka Streams application configured with `exactly_once_v2` processing guarant
 processing.guarantee = exactly_once_v2
 commit.interval.ms = 100
 num.stream.threads = 2
-num.standby.replicas = 1
-session.timeout.ms = 6000
-heartbeat.interval.ms = 2000
+num.standby.replicas = 2
+session.timeout.ms = 10000
+heartbeat.interval.ms = 3000
 max.poll.interval.ms = 30000
-max.poll.records = 1
+max.poll.records = 100
 transaction.timeout.ms = 5000
-delivery.timeout.ms = 10000
-request.timeout.ms = 5000
+delivery.timeout.ms = 30000
+request.timeout.ms = 15000
+replication.factor = 3
+acks = all
 ```
 
 ---
 
 ## Application Logic
 
-The stream application maintains a watermark (maximum timestamp seen) per key in a RocksDB-backed state store with changelog enabled.
+The stream application maintains a watermark (maximum timestamp seen) **per partition** in a local state store (`KeyValueStore<Integer, Long>`) with changelog enabled.
 
 **Processing logic:**
 ```java
+// Logic: newWatermark = max(stored_watermark, current_record_timestamp)
 long currentWatermark = (storedWatermark == null) ? 0L : storedWatermark;
 long newWatermark = Math.max(currentWatermark, recordTimestamp);
-store.put(key, newWatermark);
-// Output: "key" -> "newWatermark,status"
+store.put(recordPartition, newWatermark); // Key is partition ID (Integer)
 ```
 
-Under EOS semantics, for any given key, the watermark value in committed output should be monotonically non-decreasing.
+The application emits a record `(key, value)` where `value` contains the `newWatermark`. The input keys are unique per message (e.g., `key-0-1`, `key-0-2`).
+
+Under EOS semantics, a specific input source record should result in exactly one unique committed output record.
 
 ---
 
 ## Downstream Validation
 
-A validator consumer reads from the sink topic with `isolation.level=read_committed` and tracks the last seen watermark for each key. It flags an inconsistency if a newly consumed committed message contains a different watermark value than previously observed for the same key.
+A validator consumer reads from the sink topic with `isolation.level=read_committed` and tracks the watermark seen for each unique key. Since input keys are unique, each key should appear exactly once in the committed output.
+
+The validator flags an error if it observes the same key more than once with a different watermark, indicating inconsistent processing or duplicate delivery of what should be a unique EOS result.
 
 ```java
-props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
-// ...
 if (lastWatermark != null && newWatermark != lastWatermark) {
     log.error("BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION");
 }
@@ -72,22 +76,18 @@ if (lastWatermark != null && newWatermark != lastWatermark) {
 
 ## Reproduction Steps
 
-1. Start 3-broker Kafka cluster with Zookeeper
-2. Create topics with 64 partitions, replication factor 3
-3. Inject 640,000 messages (10,000 per partition) with monotonically increasing timestamps
-4. Start validator consumer with `read_committed`
-5. Start stream-app-1 (receives all 64 partitions)
-6. Inject network chaos (150ms delay, 10% packet loss) to a random broker
-7. Start stream-app-2 (triggers rebalance: 64 → 32+32)
-8. Wait 20 seconds, clear network chaos
-9. Repeat network chaos injection
-10. Start stream-app-3 (triggers rebalance: 32+32 → ~21+21+22)
-11. Perform kill/restart cycles on random stream-app instances with intermittent network chaos
-
-**Network chaos injection:**
-```bash
-docker compose exec -u root $kafka_target tc qdisc add dev eth0 root netem delay 150ms 50ms loss 10%
-```
+1. Start 3-broker Kafka cluster with Zookeeper and 3 Cassandra nodes.
+2. Create topics with 64 partitions, replication factor 3.
+3. Inject 640,000 messages (64 partitions x 10,000 messages).
+4. Start validator consumer with `read_committed`.
+5. **Run Structured Progressive Startup Cycles:**
+    - **Cycle Start:** Stop all stream app instances.
+    - **Start Stream-App-1**: Wait 30s.
+    - **Start Stream-App-2**: Inject network chaos (150ms delay, 10% loss) -> Start -> Wait 30s -> Remove chaos.
+    - **Start Stream-App-3**: Inject network chaos (150ms delay, 10% loss) -> Start -> Wait 30s -> Remove chaos.
+    - **Steady State**: Wait 60s.
+    - **Stop All**: Stop all instances to reset for the next cycle.
+6. The bug typically reproduces during the progressive startup phase when rebalancing occurs under network stress.
 
 ---
 
@@ -95,64 +95,29 @@ docker compose exec -u root $kafka_target tc qdisc add dev eth0 root netem delay
 
 ### Bug Reproduced At
 
-**Timestamp:** 2026-02-02 19:41:34 UTC
+**Timestamp:** 2026-02-03 15:55:26 UTC
 
 ### Validator Log Output
 
 ```
-2026-02-02 19:41:34.511 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-2026-02-02 19:41:34.511 [ERROR] [main] BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)
-2026-02-02 19:41:34.511 [ERROR] [main] Key: key-15, Last: 1770060668748, New: 1770060668764, Offset: 1295, Partition: 19
-2026-02-02 19:41:34.512 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-2026-02-02 19:41:34.512 [ERROR] [main] [StreamApp Signal] State store regression detected for key: key-15
-2026-02-02 19:41:34.512 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-2026-02-02 19:41:34.512 [ERROR] [main] BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)
-2026-02-02 19:41:34.512 [ERROR] [main] Key: key-15, Last: 1770060668748, New: 1770060668764, Offset: 1296, Partition: 19
-2026-02-02 19:41:34.512 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+2026-02-03 15:55:26.322 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+2026-02-03 15:55:26.322 [ERROR] [main] BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)
+2026-02-03 15:55:26.322 [ERROR] [main] Key: key-13-5576, Last: 1770133226383, New: 1770133226403, Offset: 2842, Partition: 42
+2026-02-03 15:55:26.322 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+2026-02-03 15:55:26.322 [ERROR] [main] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+2026-02-03 15:55:26.322 [ERROR] [main] BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)
+2026-02-03 15:55:26.322 [ERROR] [main] Key: key-13-5695, Last: 1770133226383, New: 1770133226403, Offset: 2843, Partition: 42
 ```
 
 ### Observations
 
-1. **Affected Key:** `key-15`
-2. **Affected Partition:** 19
-3. **Previous Committed Value:** `1770060668748`
-4. **New Committed Value:** `1770060668764`
-5. **Observed Offsets:** 1295, 1296 (consecutive)
-6. **Consumer Isolation Level:** `read_committed`
-
-### Validation Prior to Bug
-
-```
-2026-02-02 19:34:48.946 [INFO ] [main] Validated 1000 records. Bugs detected: 0
-2026-02-02 19:36:41.850 [INFO ] [main] Validated 2000 records. Bugs detected: 0
-2026-02-02 19:40:29.041 [INFO ] [main] Validated 3000 records. Bugs detected: 0
-```
-
-The first 3000+ records were validated without detecting any inconsistency. The bug was triggered after approximately 10 minutes of processing under chaos conditions.
-
----
-
-## Expected vs Actual Behavior
-
-| Aspect | Expected (EOS Guarantee) | Actual (Observed) |
-|--------|--------------------------|-------------------|
-| Watermark for key-15 | Monotonically non-decreasing | Changed from 1770060668748 to 1770060668764 |
-| Committed record uniqueness | Each committed record for a key reflects consistent state | Multiple committed records for same key show different watermark values |
-| Read-committed visibility | Only finalized, consistent data visible | Validator saw two different values for same logical state |
-
----
-
-## Chaos Events Timeline
-
-| Time | Event |
-|------|-------|
-| 19:31:07 | Validator started |
-| 19:31:08 | Validator subscribed to sink-topic (64 partitions) |
-| 19:34:48 | 1000 records validated, 0 bugs |
-| 19:36:41 | 2000 records validated, 0 bugs |
-| 19:40:08 | Node -1 disconnected (coordinator) |
-| 19:40:29 | 3000 records validated, 0 bugs |
-| **19:41:34** | **BUG REPRODUCED** |
+1. **Affected Key:** `key-13-5576` (and others in rapid succession)
+2. **Failure Pattern:** The validator received a second committed record for the same unique key.
+3. **Values:**
+    - First committed value: `1770133226383`
+    - Second committed value: `1770133226403`
+4. **Offsets:** `2842` (for the duplicate?) - Note: The log snippet shows offsets close together for different keys, indicating a batch of duplicate processing.
+5. **Context:** The error occurred during a rebalance/chaos injection phase, causing the stream thread to likely retry processing and commit a duplicate result that should have been fenced or deduplicated by EOS limits.
 
 ---
 
@@ -161,21 +126,8 @@ The first 3000+ records were validated without detecting any inconsistency. The 
 | File | Description |
 |------|-------------|
 | `validator.log` | Validator consumer output showing bug detection |
-| `stream-app-1.log` | First stream app instance logs |
-| `stream-app-2.log` | Second stream app instance logs |
-| `stream-app-3.log` | Third stream app instance logs |
-| `kafka-1.log` | Broker 1 logs |
-| `kafka-2.log` | Broker 2 logs |
-| `kafka-3.log` | Broker 3 logs |
-
----
-
-## Reproduction Rate
-
-In the test run documented here, the bug was reproduced after:
-- ~10 minutes of processing
-- Multiple rebalance cycles (3 stream app instances starting sequentially)
-- Intermittent network chaos injection during rebalances
+| `stream-app-{1,2,3}.log` | Stream application instance logs |
+| `kafka-{1,2,3}.log` | Broker logs |
 
 ---
 

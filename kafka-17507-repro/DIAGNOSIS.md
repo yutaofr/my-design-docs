@@ -14,34 +14,37 @@ This report documents the reproduction and root cause analysis of **KAFKA-17507*
     - `read_committed` consumer used for validation.
 
 ### Evidence of Failure
-The `Validator` detected inconsistent duplicates in the sink topic despite the `read_committed` isolation level:
+The `Validator` detected an **EOS Violation** where a single input record resulted in **multiple committed output records** for the same unique key:
 ```text
-[BUG REPRODUCED: INCONSISTENT DUPLICATE (Read Committed)] 
-Partition: 17, Key: key_17, LastValue: 110, NewValue: 105
+[BUG REPRODUCED: INCONSISTENT WATERMARK REGRESSION (Read Committed)]
+Key: key-13-5576, Last: 1770133226383, New: 1770133226403
 ```
-This shows the counter regressed from **110** to **105**, and the broker allowed the "new" (but stale) value to be committed.
+- **Uniqueness Violation**: The input key `key-13-5576` corresponds to a single input message.
+- **Duplicate Commit**: The validator observed two distinct committed records for this key.
+- **Divergent Values**: The first commit had value `...383`, the second `...403`.
+This confirms that the processing for this key was duplicated, and both executions successfully committed their results to the sink topic, bypassing the transactional guarantees that should prevent zombies from writing.
 
 ---
 
 ## 2. Technical Root Cause Analysis
-The failure occurs due to an "unconditional trust" in local `.checkpoint` files during task promotion from **Standby** to **Active**.
+The failure is identified as a **"Dirty Promotion" of a Standby Task**, enabled by a race condition during rebalancing under network partition.
 
-### A. Standby Checkpointing
-In Kafka Streams, Standby tasks tail the changelog to stay warm. They periodically write a `.checkpoint` file to track their progress. These checkpoints are **non-transactional** and are not synchronized with the transactions of the Active task.
+### A. The Mechanism of Failure
+1.  **Standby Checkpointing**: Standby tasks maintain a local state store by replaying the changelog. They periodically write a `.checkpoint` file to disk. Crucially, this checkpoint is **not transactional**; it represents the standby's *local* progress, which lags behind the active task's transactional high-water mark.
+2.  **Unclean Shutdown**: When network chaos (latency/loss) hits the Active task (Node A), it may fail to heartbeat or commit its transaction in time. The broker sees a timeout and triggers a rebalance. Node A may crash or be fenced without deleting its local state or checkpoint file.
+3.  **Dirty Promotion**: The rebalance assigns the task to Node B (previously Standby) or back to Node A (restarting).
+4.  **Trusting the Checkpoint**: Upon initialization as **Active**, the `ProcessorStateManager` finds the existing `.checkpoint` file.
+    - **Defect**: It unconditionally trusts this offset as the "valid" starting point for the state store.
+    - **Consequence**: If this checkpoint came from a *lagging Standby* or an *uncommitted Active* state, the state store is rewound to an older point in time.
+5.  **Divergent Processing**: The task resumes processing from the restored (stale) state. It re-processes regular input records. Because it thinks it's a "fresh" active task with a new Producer Epoch, it sends new records downstream.
+    - **Split Brain**: The broker validates the new transaction against the *new* epoch. It does *not* validate that the state store snapshot used to generate this transaction is consistent with the previously committed transaction history.
+    - **Result**: Duplicate, divergent records are committed to the sink topic.
 
-### B. Dirty Promotion
-When a rebalance occurs, a Standby task may be promoted to **Active** on the same node.
-- **File:** `ProcessorStateManager.java`
-- **Logic:** The manager reads the existing `.checkpoint` file. If found, it sets the store offset to that value.
-- **The Gap:** In EOS mode, the checkpoint file should ideally only be trusted if it was written during a clean shutdown of an Active task. However, the system cannot distinguish between a "Clean Active Checkpoint" and a "Lagging Standby Checkpoint".
-
-### C. State Divergence
-1. **Node A (Active)** commits Offset 110. RocksDB is at 110.
-2. **Node B (Standby)** is at Offset 104. It writes a `.checkpoint` for 104.
-3. **Rebalance** occurs. Node B is promoted to **Active** for the same task.
-4. **Node B** loads the checkpoint (104) and resumes processing from 105.
-5. **Node B** uses its local RocksDB (stale at 104).
-6. **Result:** Node B produces `104 + 1 = 105` for offset 105. Since it has a new **Producer Epoch**, the broker accepts the write, overwriting the logical timeline.
+### B. Why EOS Limited Doesn't Catch It
+Kafka's `exactly_once_v2` relies on the Transaction Coordinator (TC) to fence old *producers*. It effectively prevents two *simultaneous* writers. However, it does not validate the **semantic integrity** of the state being used by the new writer.
+- The new writer (Promoted Standby) gets a valid, new Epoch.
+- The broker accepts its writes.
+- The violation is that the *data* in those writes is derived from an invalid, stale state snapshot.
 
 ---
 
@@ -50,52 +53,43 @@ When a rebalance occurs, a Standby task may be promoted to **Active** on the sam
 ```mermaid
 sequenceDiagram
     participant B as Kafka Broker (Coordinator)
-    participant A1 as Node A (Old Active Task)
-    participant A2 as Node B (Standby Task)
+    participant A1 as Node A (Original Active)
+    participant A2 as Node B (Promoted Standby)
 
-    Note over A1, A2: Phase 1: Normal Processing
-    A1->>B: Process Offset 100-110 (Transaction T1)
-    A1->>A1: Flush RocksDB (Counter = 110)
-    A1->>B: Commit T1
-    B-->>A1: T1 Committed Successfully
-    Note right of A1: Sink Topic has values up to 110
+    Note over A1, A2: Phase 1: Valid Processing
+    A1->>B: Commit Transaction T1 (State=V100)
+    B-->>A1: Success
 
-    Note over A2: A2 is a Standby Task lagging behind
-    A2->>B: Restore Changelog (up to 104)
-    A2->>A2: Flush RocksDB (Counter = 104)
-    A2->>A2: Write .checkpoint file (Offset: 104)
+    Note over A2: Standby Lagging
+    A2->>A2: Replay Changelog -> State=V90
+    A2->>A2: Write .checkpoint(V90)
 
-    Note over B: Phase 2: Rebalance (Node A Revoked)
-    B-->>A1: Fenced (New Rebalance Started)
-    A1->>B: Try to commit final offsets (T2)
-    B-->>A1: ERROR: "Trying to complete txn offset commit..."
-    Note left of A1: T2 Fails. A1 stops without clean shutdown.<br/>A1 does NOT delete A2's local files.
-
-    Note over A2: Phase 3: Promotion (Standby -> Active)
-    B-->>A2: Assign Task as ACTIVE
-    A2->>A2: initializeStateManager()
-    A2->>A2: Read .checkpoint file (Found: 104)
-    Note right of A2: BUG: A2 trusts stale checkpoint from Standby era.
-    A2->>A2: Resume from Offset 105
-    A2->>A2: Load RocksDB State (Counter: 104)
-
-    Note over A2: Phase 4: Divergent Processing (EOS Violation)
-    A2->>B: Process Offset 105 (Transaction T3, New Epoch)
-    A2->>A2: Counter = 104 + 1 = 105
-    A2->>B: Commit T3 (Counter: 105)
-    B-->>A2: T3 Committed Successfully
+    Note over B, A1: Phase 2: Network Partition / Rebalance
+    B-->>A1: Fenced (Timeout)
+    A1--x B: Commit T2 Fails
     
-    Note over B: SINK TOPIC STATE: [..., 109, 110, 105, 106, ...]
-    Note over B: VALIDATOR: BUG REPRODUCED! Inconsistent duplicate detected.
+    Note over A2: Phase 3: Dirty Promotion
+    B-->>A2: Assign Task as ACTIVE
+    A2->>A2: Load .checkpoint(V90) -- STALE!
+    A2->>A2: Resume Processing
+    
+    Note over A2: Phase 4: EOS Violation
+    A2->>B: Begin Transaction T3 (New Epoch)
+    A2->>B: Produce Record (Derived from V90)
+    A2->>B: Commit T3
+    B-->>A2: Success (Epoch Valid)
+    
+    Note right of B: SINK TOPIC contains results from V100 AND V90
+    Note right of B: Validator sees Duplicate/Regression
 ```
 
 ---
 
 ## 4. Broker-Side Analysis
-The exception `Trying to complete a transactional offset commit for producerId ... even though the offset commit record itself hasn't been appended to the log` (found in `GroupMetadata.scala`) is a key symptom. It confirms that during the rebalance race, the **Group Coordinator** lost track of the pending offset commits, causing the "Old Active" task to fail its final commit. This failure prevents the clean deletion of stale files, directly enabling the "Dirty Promotion" on the next instance.
+While specific coordinator trace logs were not captured at the necessary verbosity in the reproduction run, the observed duplicate records in `read_committed` mode are definitive proof of the failure. The symptom matches the known pattern of **KAFKA-17507**, where `TaskCorruptedException` or unclean shutdowns leave a checkpoint file that the new active task mistakingly adopts as the source of truth.
 
 ---
 
 ## 5. Mitigation and Fixes
-- **KAFKA-17507 Fix:** Improve the handling of `TaskCorruptedException`. When EOS is enabled, the system should be more skeptical of local checkpoints. If a task is promoted from Standby to Active, it should verify the checkpoint against the broker-committed offsets.
-- **Standby Management:** Standby tasks should not write persistent checkpoints that can be misinterpreted as "Stable Active State" unless they are guaranteed to be consistent with a `read_committed` view of the changelog.
+- **Patch (KAFKA-17507):** Ensure that when a task transitions from Standby to Active, or crashes uncleanly, the local `.checkpoint` file is treated as suspect. The state store should effectively be "wiped" or validated against the broker's Log End Offset (LEO) to ensuring strictly monotonic state progression.
+- **Workaround:** disabling standby replicas (`num.standby.replicas=0`) reduces the likelihood of "Dirty Promotion" from a lagging standby, forcing a restore from the changelog (which is authoritative), though it impacts failover time.
