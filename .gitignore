@@ -7,3 +7,4 @@ kafka-17507-repro/.settings
 media
 kafka-17507-repro/bin
 kafka-17507-repro/logs/
+kafka-17507-repro/build
