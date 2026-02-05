@@ -242,13 +242,13 @@ echo "=== Starting Structured Reproduction Cycles ==="
 
 docker compose stop stream-app-1 stream-app-2 stream-app-3
 
-for i in {1..20}; do
+for i in {1..50}; do
     echo "=== Cycle $i: Progressive Startup ==="
     
     # 1. Start App 1
     echo "Cycle $i: Starting stream-app-1..."
     docker compose up -d stream-app-1
-    sleep 30
+    sleep 10
     check_bug && end_test "Bug reproduced in Cycle $i (App 1)" 1
     
     # 2. Start App 2 with Chaos
@@ -257,7 +257,7 @@ for i in {1..20}; do
     docker compose exec -u root $kafka_target tc qdisc add dev eth0 root netem delay 150ms 50ms loss 10% 2>/dev/null || true
     
     docker compose up -d stream-app-2
-    sleep 30
+    sleep 10
     
     docker compose exec -u root $kafka_target tc qdisc del dev eth0 root 2>/dev/null || true
     check_bug && end_test "Bug reproduced in Cycle $i (App 2)" 1
@@ -268,20 +268,20 @@ for i in {1..20}; do
     docker compose exec -u root $kafka_target tc qdisc add dev eth0 root netem delay 150ms 50ms loss 10% 2>/dev/null || true
     
     docker compose up -d stream-app-3
-    sleep 30
+    sleep 10
     
     docker compose exec -u root $kafka_target tc qdisc del dev eth0 root 2>/dev/null || true
     check_bug && end_test "Bug reproduced in Cycle $i (App 3)" 1
     
     # 4. Wait 1 Minute Steady State
     echo "Cycle $i: Waiting 60s steady state..."
-    sleep 60
+    sleep 10
     check_bug && end_test "Bug reproduced in Cycle $i (Steady State)" 1
     
     # 5. Stop All (Effective Restart for next cycle)
     echo "Cycle $i: Stopping all stream apps..."
     docker compose stop stream-app-1 stream-app-2 stream-app-3
-    sleep 5
+    sleep 1
 done
 
 echo "=== Waiting for processing to complete ==="

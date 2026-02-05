@@ -25,7 +25,7 @@ public class Injector {
         KafkaProducer<String, String> producer = new KafkaProducer<>(props);
 
         int numPartitions = 64;
-        int messagesPerPartition = 10000;
+        int messagesPerPartition = 100000;
 
         System.out.println("Starting injection of " + (numPartitions * messagesPerPartition) + " messages...");
 
